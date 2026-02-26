@@ -56,6 +56,7 @@ app.use((req, res, next) => {
 });
 
 async function seedSettingsFromEnv() {
+  if (!db) return;
   const envMappings: [string, string | undefined][] = [
     ["api_key", process.env.BUNNY_API_KEY],
     ["library_id", process.env.BUNNY_LIBRARY_ID],

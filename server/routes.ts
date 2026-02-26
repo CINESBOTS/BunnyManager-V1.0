@@ -17,6 +17,7 @@ function parseConfigHeader(req: Request): Record<string, string> {
 }
 
 async function getSetting(key: string): Promise<string | null> {
+  if (!db) return null;
   try {
     const result = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
     return result.length > 0 ? result[0].value : null;
@@ -55,20 +56,18 @@ export async function registerRoutes(
   // ===== Settings =====
 
   app.get("/api/settings", async (req: Request, res: Response) => {
-    try {
-      const hdr = parseConfigHeader(req);
-      const result: Record<string, string> = {};
+    const hdr = parseConfigHeader(req);
+    const result: Record<string, string> = {};
+    if (db) {
       try {
         const allSettings = await db.select().from(settings);
         for (const s of allSettings) result[s.key] = s.value;
       } catch {}
-      for (const k of ["api_key", "library_id", "download_domain", "account_api_key"] as const) {
-        if (hdr[k]) result[k] = hdr[k];
-      }
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
     }
+    for (const k of ["api_key", "library_id", "download_domain", "account_api_key"] as const) {
+      if (hdr[k]) result[k] = hdr[k];
+    }
+    res.json(result);
   });
 
   app.put("/api/settings", async (req: Request, res: Response) => {
@@ -76,15 +75,15 @@ export async function registerRoutes(
       const { key, value } = req.body;
       if (!key || typeof key !== "string") return res.status(400).json({ message: "Key is required" });
       if (!value || typeof value !== "string") return res.status(400).json({ message: "Value is required" });
-
       const validKeys = ["api_key", "library_id", "download_domain", "account_api_key"];
       if (!validKeys.includes(key)) return res.status(400).json({ message: "Invalid setting key" });
-
-      const existing = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
-      if (existing.length > 0) {
-        await db.update(settings).set({ value }).where(eq(settings.key, key));
-      } else {
-        await db.insert(settings).values({ key, value });
+      if (db) {
+        const existing = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
+        if (existing.length > 0) {
+          await db.update(settings).set({ value }).where(eq(settings.key, key));
+        } else {
+          await db.insert(settings).values({ key, value });
+        }
       }
       res.json({ success: true });
     } catch (err: any) {
@@ -95,7 +94,7 @@ export async function registerRoutes(
   app.delete("/api/settings/:key", async (req: Request, res: Response) => {
     try {
       const { key } = req.params;
-      await db.delete(settings).where(eq(settings.key, key));
+      if (db) await db.delete(settings).where(eq(settings.key, key));
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ message: err.message });

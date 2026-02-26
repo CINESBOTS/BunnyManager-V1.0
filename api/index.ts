@@ -16,18 +16,20 @@ let initialized = false;
 async function init() {
   if (initialized) return;
 
-  const envMappings: [string, string | undefined][] = [
-    ["api_key", process.env.BUNNY_API_KEY],
-    ["library_id", process.env.BUNNY_LIBRARY_ID],
-  ];
-  for (const [key, envValue] of envMappings) {
-    if (!envValue) continue;
-    try {
-      const existing = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
-      if (existing.length === 0) {
-        await db.insert(settings).values({ key, value: envValue });
-      }
-    } catch {}
+  if (db) {
+    const envMappings: [string, string | undefined][] = [
+      ["api_key", process.env.BUNNY_API_KEY],
+      ["library_id", process.env.BUNNY_LIBRARY_ID],
+    ];
+    for (const [key, envValue] of envMappings) {
+      if (!envValue) continue;
+      try {
+        const existing = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
+        if (existing.length === 0) {
+          await db.insert(settings).values({ key, value: envValue });
+        }
+      } catch {}
+    }
   }
 
   await registerRoutes(httpServer, app);
