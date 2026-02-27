@@ -209,6 +209,21 @@ app.delete("/api/videos/:videoId", async (req: Request, res: Response) => {
   }
 });
 
+// ── EvoStream API Push proxy ──────────────────────────────────────────────────
+
+app.post("/api/evo-push", async (req: Request, res: Response) => {
+  try {
+    const { url, evoKey, evoServer, evoDisk, evoEncode } = req.body;
+    if (!url || !evoKey) return res.status(400).json({ message: "url and evoKey are required" });
+    const target = `https://evostream.top/api/addVideo.php?key=${encodeURIComponent(evoKey)}&url=${encodeURIComponent(url)}&server=${encodeURIComponent(evoServer ?? "1")}&disk=${encodeURIComponent(evoDisk ?? "0")}&encode=${encodeURIComponent(evoEncode ?? "0")}`;
+    const r = await fetch(target);
+    const text = await r.text();
+    return res.json({ status: r.status, ok: r.ok, body: text });
+  } catch (err: any) {
+    return res.status(500).json({ message: err.message });
+  }
+});
+
 // ── Error handler ─────────────────────────────────────────────────────────────
 
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

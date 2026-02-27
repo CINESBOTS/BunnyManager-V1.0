@@ -5,6 +5,10 @@ export interface LocalSettings {
   library_id?: string;
   download_domain?: string;
   account_api_key?: string;
+  evo_key?: string;
+  evo_server?: string;
+  evo_disk?: string;
+  evo_encode?: string;
 }
 
 export function getLocalSettings(): LocalSettings {

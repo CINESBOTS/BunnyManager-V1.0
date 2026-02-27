@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Separator } from "@/components/ui/separator";
-import { ArrowLeft, Save, Trash2, Eye, EyeOff, Settings, Key, Globe, Library, CreditCard, RefreshCw, Loader2 } from "lucide-react";
+import { ArrowLeft, Save, Trash2, Eye, EyeOff, Settings, Key, Globe, Library, CreditCard, RefreshCw, Loader2, Send } from "lucide-react";
 
 interface BillingData {
   Balance: number;
@@ -35,6 +35,13 @@ const SETTING_FIELDS = [
   { key: "download_domain" as keyof LocalSettings, label: "Download Domain", icon: Globe, placeholder: "e.g. vz-xxxxx.b-cdn.net", sensitive: false },
 ] as const;
 
+const EVO_FIELDS = [
+  { key: "evo_key" as keyof LocalSettings, label: "EvoStream API Key", icon: Key, placeholder: "e.g. s5ftz8o4G", sensitive: true },
+  { key: "evo_server" as keyof LocalSettings, label: "Server Number", icon: Send, placeholder: "e.g. 1", sensitive: false },
+  { key: "evo_disk" as keyof LocalSettings, label: "Disk Number", icon: Send, placeholder: "e.g. 0", sensitive: false },
+  { key: "evo_encode" as keyof LocalSettings, label: "Encode", icon: Send, placeholder: "e.g. 0", sensitive: false },
+] as const;
+
 export default function SettingsPage() {
   const { toast } = useToast();
   const [, setLocation] = useLocation();
@@ -45,6 +52,10 @@ export default function SettingsPage() {
       api_key: saved.api_key || "",
       library_id: saved.library_id || "",
       download_domain: saved.download_domain || "",
+      evo_key: saved.evo_key || "",
+      evo_server: saved.evo_server || "1",
+      evo_disk: saved.evo_disk || "0",
+      evo_encode: saved.evo_encode || "0",
     };
   });
   const [saved, setSaved] = useState<Record<string, boolean>>(() => {
@@ -54,6 +65,10 @@ export default function SettingsPage() {
       api_key: !!s.api_key,
       library_id: !!s.library_id,
       download_domain: !!s.download_domain,
+      evo_key: !!s.evo_key,
+      evo_server: !!s.evo_server,
+      evo_disk: !!s.evo_disk,
+      evo_encode: !!s.evo_encode,
     };
   });
   const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>({});
@@ -262,6 +277,84 @@ export default function SettingsPage() {
                           onClick={() => handleDelete(field.key)}
                           data-testid={`button-confirm-delete-${field.key}`}
                         >
+                          Delete
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                )}
+              </div>
+            </Card>
+          );
+        })}
+        <Separator />
+
+        <div className="flex items-center gap-2 pt-1">
+          <Send className="w-4 h-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">EvoStream API Push</h2>
+        </div>
+
+        {EVO_FIELDS.map(field => {
+          const hasValue = saved[field.key];
+          return (
+            <Card key={field.key} className="p-5">
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2">
+                  <field.icon className="w-4 h-4 text-muted-foreground" />
+                  <Label className="text-sm font-medium">{field.label}</Label>
+                </div>
+                {hasValue ? (
+                  <Badge variant="secondary" data-testid={`badge-status-${field.key}`}>Configured</Badge>
+                ) : (
+                  <Badge variant="outline" data-testid={`badge-status-${field.key}`}>Not Set</Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Input
+                    type={field.sensitive && !visibleFields[field.key] ? "password" : "text"}
+                    value={formValues[field.key] || ""}
+                    onChange={(e) => setFormValues(prev => ({ ...prev, [field.key]: e.target.value }))}
+                    placeholder={field.placeholder}
+                    data-testid={`input-${field.key}`}
+                  />
+                </div>
+                {field.sensitive && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => setVisibleFields(prev => ({ ...prev, [field.key]: !prev[field.key] }))}
+                    data-testid={`button-toggle-${field.key}-visibility`}
+                  >
+                    {visibleFields[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  onClick={() => handleSave(field.key)}
+                  disabled={!formValues[field.key]?.trim()}
+                  data-testid={`button-save-${field.key}`}
+                >
+                  <Save className="w-4 h-4 mr-1.5" />
+                  Save
+                </Button>
+                {hasValue && (
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button size="icon" variant="ghost" data-testid={`button-delete-${field.key}`}>
+                        <Trash2 className="w-4 h-4 text-destructive" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete {field.label}?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This will remove the {field.label} from your browser.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => handleDelete(field.key)} data-testid={`button-confirm-delete-${field.key}`}>
                           Delete
                         </AlertDialogAction>
                       </AlertDialogFooter>

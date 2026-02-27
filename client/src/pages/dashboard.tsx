@@ -22,7 +22,7 @@ import {
   RefreshCw, CheckCircle2, XCircle, Loader2, FileVideo, FolderSync,
   LayoutGrid, List, Search, AlertTriangle, CloudUpload, FolderInput,
   ChevronRight, Play, Pause, SkipForward, Film, Percent, Copy, ClipboardCheck,
-  Settings, CreditCard, ArrowRightLeft, FolderMinus, CheckSquare, Download, X, Info, Captions
+  Settings, CreditCard, ArrowRightLeft, FolderMinus, CheckSquare, Download, X, Info, Send
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -87,25 +87,22 @@ export default function Dashboard() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedVideos, setSelectedVideos] = useState<Set<string>>(new Set());
   const uploadedRegistry = useRef<Set<string>>(new Set());
-  const [burnSubtitles, setBurnSubtitlesRaw] = useState<boolean>(() => {
-    try {
-      const s = localStorage.getItem("bunny_burn_subtitles");
-      return s === null ? true : s === "true";
-    } catch { return true; }
-  });
-  const burnSubtitlesRef = useRef(burnSubtitles);
-  const setBurnSubtitles = (v: boolean) => {
-    burnSubtitlesRef.current = v;
-    setBurnSubtitlesRaw(v);
-    try { localStorage.setItem("bunny_burn_subtitles", String(v)); } catch {}
-  };
+  const [evoPushRunning, setEvoPushRunning] = useState(false);
+  const [evoPushSent, setEvoPushSent] = useState(0);
+  const [evoPushTotal, setEvoPushTotal] = useState(0);
+  const [evoPushStatus, setEvoPushStatus] = useState<"idle" | "checking" | "sending">("idle");
+  const evoPushStopRef = useRef(false);
+  const evoSentRegistry = useRef<Set<string>>(new Set());
+
 
   useEffect(() => {
     try {
       const stored = localStorage.getItem("bunny_uploaded_files");
-      if (stored) {
-        uploadedRegistry.current = new Set(JSON.parse(stored) as string[]);
-      }
+      if (stored) uploadedRegistry.current = new Set(JSON.parse(stored) as string[]);
+    } catch {}
+    try {
+      const stored = localStorage.getItem("bunny_evo_pushed");
+      if (stored) evoSentRegistry.current = new Set(JSON.parse(stored) as string[]);
     } catch {}
   }, []);
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
@@ -393,7 +390,7 @@ export default function Dashboard() {
         xhr.send(file);
       });
 
-      if (burnSubtitlesRef.current && subtitleFile) {
+      if (subtitleFile) {
         try {
           const subtitleText = await subtitleFile.text();
           const blob = new Blob([subtitleText], { type: "text/plain" });
@@ -421,6 +418,71 @@ export default function Dashboard() {
       ));
     }
   }, [addToUploadedRegistry]);
+
+  const startEvoPush = useCallback(async (collectionId: string | null, libraryId: string) => {
+    const { getLocalSettings, buildConfigHeader } = await import("@/lib/localSettings");
+    const s = getLocalSettings();
+    const evoKey = s.evo_key;
+    const evoServer = s.evo_server ?? "1";
+    const evoDisk = s.evo_disk ?? "0";
+    const evoEncode = s.evo_encode ?? "0";
+    if (!evoKey) {
+      toast({ title: "EvoStream API key not configured", description: "Add it in Settings", variant: "destructive" });
+      return;
+    }
+    evoPushStopRef.current = false;
+    setEvoPushRunning(true);
+    setEvoPushStatus("checking");
+
+    const collKey = collectionId ?? "";
+
+    while (!evoPushStopRef.current) {
+      setEvoPushStatus("checking");
+      try {
+        const configHeader = buildConfigHeader();
+        const r = await fetch(`/api/videos/${collectionId ?? "all"}`, { headers: configHeader });
+        if (!r.ok) { await new Promise(res => setTimeout(res, 30000)); continue; }
+        const data = await r.json();
+        const allVideos: any[] = data.items || [];
+        const playReadyVideos = allVideos.filter(v => v.status === 4);
+
+        const totalSentForCollection = Array.from(evoSentRegistry.current).filter(k => k.startsWith(`${collKey}:`)).length;
+        setEvoPushTotal(playReadyVideos.length);
+        setEvoPushSent(totalSentForCollection);
+
+        const unsentVideos = playReadyVideos.filter(v => !evoSentRegistry.current.has(`${collKey}:${v.guid}`));
+
+        if (unsentVideos.length > 0) {
+          setEvoPushStatus("sending");
+          for (const video of unsentVideos) {
+            if (evoPushStopRef.current) break;
+            const iframeUrl = `https://iframe.mediadelivery.net/play/${libraryId}/${video.guid}`;
+            try {
+              const res = await fetch("/api/evo-push", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...configHeader },
+                body: JSON.stringify({ url: iframeUrl, evoKey, evoServer, evoDisk, evoEncode }),
+              });
+              if (res.ok) {
+                evoSentRegistry.current.add(`${collKey}:${video.guid}`);
+                try { localStorage.setItem("bunny_evo_pushed", JSON.stringify(Array.from(evoSentRegistry.current))); } catch {}
+                const newSent = Array.from(evoSentRegistry.current).filter(k => k.startsWith(`${collKey}:`)).length;
+                setEvoPushSent(newSent);
+              }
+            } catch { /* continue */ }
+            await new Promise(res => setTimeout(res, 400));
+          }
+        }
+      } catch { /* continue */ }
+
+      if (evoPushStopRef.current) break;
+      setEvoPushStatus("checking");
+      await new Promise(res => setTimeout(res, 30000));
+    }
+
+    setEvoPushRunning(false);
+    setEvoPushStatus("idle");
+  }, [toast]);
 
   const handleFileSelect = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -914,22 +976,6 @@ export default function Dashboard() {
             </Button>
           )}
 
-          <div className="flex items-center justify-between mt-3 px-1 py-1.5 rounded-md">
-            <div className="flex items-center gap-1.5">
-              <Captions className="w-3.5 h-3.5 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground">Burn Subtitles</span>
-            </div>
-            <button
-              role="switch"
-              aria-checked={burnSubtitles}
-              onClick={() => setBurnSubtitles(!burnSubtitles)}
-              data-testid="switch-burn-subtitles"
-              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${burnSubtitles ? "bg-primary" : "bg-input"}`}
-            >
-              <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transition-transform ${burnSubtitles ? "translate-x-4" : "translate-x-0"}`} />
-            </button>
-          </div>
-
           <Button
             variant="ghost"
             size="sm"
@@ -1026,7 +1072,7 @@ export default function Dashboard() {
             const totalVideos = videos.length;
             const processingVideos = videos.filter(v => [0, 1, 2, 3, 6].includes(v.status)).length;
             const playReady = videos.filter(v => v.status === 4).length;
-            return (
+            return (<>
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div className="flex items-center gap-3 flex-wrap">
                   <Badge variant="secondary" data-testid="badge-total-videos">
@@ -1120,7 +1166,73 @@ export default function Dashboard() {
                   </Button>
                 </div>
               </div>
-            );
+
+              {/* EvoStream API Push Panel */}
+              {uploadConfigQuery.data?.libraryId && (() => {
+                const collKey = selectedCollection ?? "";
+                const sentCount = evoPushRunning
+                  ? evoPushSent
+                  : Array.from(evoSentRegistry.current).filter(k => k.startsWith(`${collKey}:`)).length;
+                const totalCount = evoPushRunning ? evoPushTotal : playReady;
+                const pct = totalCount > 0 ? Math.round((sentCount / totalCount) * 100) : 0;
+                return (
+                  <div className="flex items-center gap-3 flex-wrap border rounded-lg px-4 py-2.5 bg-muted/30" data-testid="panel-evo-push">
+                    <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground min-w-0">
+                      <Send className="w-3.5 h-3.5 shrink-0" />
+                      <span>API Push</span>
+                      {evoPushRunning && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${evoPushStatus === "sending" ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"}`}>
+                          {evoPushStatus === "sending" ? "Sending" : "Checking..."}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-4 flex-1 min-w-0 flex-wrap">
+                      <div className="flex items-center gap-1.5 text-xs" data-testid="text-play-ready-count">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
+                        <span className="text-muted-foreground">Play Ready:</span>
+                        <span className="font-semibold">{totalCount}</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-1 min-w-[160px]">
+                        <div className="flex items-center gap-1.5 text-xs" data-testid="text-evo-sent-count">
+                          <span className="text-muted-foreground">Sent:</span>
+                          <span className="font-semibold">{sentCount}/{totalCount}</span>
+                        </div>
+                        <div className="flex-1 bg-muted rounded-full h-1.5 overflow-hidden min-w-[80px]">
+                          <div
+                            className="h-full bg-primary transition-all duration-300 rounded-full"
+                            style={{ width: `${pct}%` }}
+                            data-testid="bar-evo-progress"
+                          />
+                        </div>
+                        <span className="text-xs text-muted-foreground tabular-nums w-8 text-right" data-testid="text-evo-percent">
+                          {pct}%
+                        </span>
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={evoPushRunning ? "destructive" : "default"}
+                      data-testid="button-evo-push-start"
+                      onClick={() => {
+                        if (evoPushRunning) {
+                          evoPushStopRef.current = true;
+                          setEvoPushRunning(false);
+                          setEvoPushStatus("idle");
+                        } else {
+                          startEvoPush(selectedCollection, uploadConfigQuery.data!.libraryId);
+                        }
+                      }}
+                    >
+                      {evoPushRunning ? (
+                        <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Stop</>
+                      ) : (
+                        <><Send className="w-3.5 h-3.5 mr-1.5" />Start Push</>
+                      )}
+                    </Button>
+                  </div>
+                );
+              })()}
+            </>);
           })()}
         </header>
 
