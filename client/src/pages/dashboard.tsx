@@ -148,7 +148,11 @@ export default function Dashboard() {
   const videosQuery = useQuery<BunnyVideoListResponse>({
     queryKey: ["/api/videos", collectionFilter],
     queryFn: async () => {
-      const res = await fetch(`/api/videos/${collectionFilter}`, { credentials: "include" });
+      const { buildConfigHeader } = await import("@/lib/localSettings");
+      const res = await fetch(`/api/videos/${collectionFilter}`, {
+        credentials: "include",
+        headers: buildConfigHeader(),
+      });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
@@ -313,7 +317,8 @@ export default function Dashboard() {
         item.id === queueId ? { ...item, status: "uploading" as const, progress: 5 } : item
       ));
 
-      const configRes = await fetch("/api/upload-config");
+      const { buildConfigHeader } = await import("@/lib/localSettings");
+      const configRes = await fetch("/api/upload-config", { headers: buildConfigHeader() });
       if (!configRes.ok) throw new Error("Failed to get upload config");
       const config = await configRes.json();
 
