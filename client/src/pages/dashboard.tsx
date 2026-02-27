@@ -22,7 +22,7 @@ import {
   RefreshCw, CheckCircle2, XCircle, Loader2, FileVideo, FolderSync,
   LayoutGrid, List, Search, AlertTriangle, CloudUpload, FolderInput,
   ChevronRight, Play, Pause, SkipForward, Film, Percent, Copy, ClipboardCheck,
-  Settings, CreditCard, ArrowRightLeft, FolderMinus, CheckSquare, Download, X, Info
+  Settings, CreditCard, ArrowRightLeft, FolderMinus, CheckSquare, Download, X, Info, Captions
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -80,12 +80,25 @@ export default function Dashboard() {
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const [watchedFolder, setWatchedFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [watchedFolderName, setWatchedFolderName] = useState<string>("");
-  const [knownFiles, setKnownFiles] = useState<Map<string, { size: number; stableCount: number; lastModified: number }>>(new Map());
+  const [knownFiles, setKnownFiles] = useState<Map<string, { size: number; stableCount: number; lastModified: number; queued?: boolean }>>(new Map());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const scanFolderRef = useRef<() => void>(() => {});
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedVideos, setSelectedVideos] = useState<Set<string>>(new Set());
   const uploadedRegistry = useRef<Set<string>>(new Set());
+  const [burnSubtitles, setBurnSubtitlesRaw] = useState<boolean>(() => {
+    try {
+      const s = localStorage.getItem("bunny_burn_subtitles");
+      return s === null ? true : s === "true";
+    } catch { return true; }
+  });
+  const burnSubtitlesRef = useRef(burnSubtitles);
+  const setBurnSubtitles = (v: boolean) => {
+    burnSubtitlesRef.current = v;
+    setBurnSubtitlesRaw(v);
+    try { localStorage.setItem("bunny_burn_subtitles", String(v)); } catch {}
+  };
 
   useEffect(() => {
     try {
@@ -297,7 +310,7 @@ export default function Dashboard() {
     );
   }, [videosQuery.data, getCleanTitle, isInUploadedRegistry, selectedCollection]);
 
-  const uploadFile = useCallback(async (file: File, collectionId: string | null) => {
+  const uploadFile = useCallback(async (file: File, collectionId: string | null, subtitleFile?: File) => {
     const queueId = crypto.randomUUID();
     const queueItem: UploadQueueItem = {
       id: queueId,
@@ -380,6 +393,22 @@ export default function Dashboard() {
         xhr.send(file);
       });
 
+      if (burnSubtitlesRef.current && subtitleFile) {
+        try {
+          const subtitleText = await subtitleFile.text();
+          const blob = new Blob([subtitleText], { type: "text/plain" });
+          const form = new FormData();
+          form.append("captionsFile", blob, subtitleFile.name);
+          await fetch(`${config.apiUrl}/library/${config.libraryId}/videos/${videoData.guid}/captions/en`, {
+            method: "PUT",
+            headers: { AccessKey: config.apiKey },
+            body: form,
+          });
+        } catch {
+          // subtitle upload failed silently — don't fail the whole upload
+        }
+      }
+
       setUploadQueue(prev => prev.map(item =>
         item.id === queueId ? { ...item, status: "complete" as const, progress: 100 } : item
       ));
@@ -396,10 +425,30 @@ export default function Dashboard() {
   const handleFileSelect = useCallback((files: FileList | null) => {
     if (!files) return;
     const videoExtensions = [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg", ".ts"];
-    let skippedCount = 0;
+    const subtitleExtensions = [".srt", ".vtt", ".ass"];
+
+    const subtitleMap = new Map<string, File>();
+    const videoFiles: File[] = [];
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const ext = "." + file.name.split(".").pop()?.toLowerCase();
+      if (subtitleExtensions.includes(ext)) {
+        const base = file.name.slice(0, file.name.lastIndexOf(".")).toLowerCase();
+        subtitleMap.set(base, file);
+      } else {
+        videoFiles.push(file);
+      }
+    }
+
+    let skippedCount = 0;
+    for (const file of videoFiles) {
+      const ext = "." + file.name.split(".").pop()?.toLowerCase();
+      const base = file.name.slice(0, file.name.lastIndexOf(".")).toLowerCase();
+      const subtitleFile = subtitleMap.get(base);
+      const alreadyInQueue = uploadQueue.some(
+        q => q.fileName === file.name && (q.status === "uploading" || q.status === "pending" || q.status === "complete")
+      );
       if (!videoExtensions.includes(ext)) {
         setUploadQueue(prev => [...prev, {
           id: crypto.randomUUID(),
@@ -409,7 +458,7 @@ export default function Dashboard() {
           progress: 0,
           error: "Not a video file",
         }]);
-      } else if (isVideoDuplicate(file.name)) {
+      } else if (alreadyInQueue || isInUploadedRegistry(file.name, selectedCollection)) {
         skippedCount++;
         setUploadQueue(prev => [...prev, {
           id: crypto.randomUUID(),
@@ -417,16 +466,17 @@ export default function Dashboard() {
           fileSize: file.size,
           status: "skipped",
           progress: 0,
-          error: "Already exists in collection",
+          error: "Already uploaded to this collection",
         }]);
       } else {
-        uploadFile(file, selectedCollection);
+        addToUploadedRegistry(file.name, selectedCollection);
+        uploadFile(file, selectedCollection, subtitleFile);
       }
     }
     if (skippedCount > 0) {
-      toast({ title: `${skippedCount} file(s) skipped`, description: "Already exist in this collection" });
+      toast({ title: `${skippedCount} file(s) skipped`, description: "Already uploaded to this collection" });
     }
-  }, [selectedCollection, uploadFile, isVideoDuplicate, toast]);
+  }, [selectedCollection, uploadFile, isInUploadedRegistry, addToUploadedRegistry, uploadQueue, toast]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -500,14 +550,14 @@ export default function Dashboard() {
 
     try {
       const currentFiles = new Map<string, { size: number; lastModified: number }>();
+      const subtitleFiles = new Map<string, File>();
       const videoExtensions = [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg", ".ts"];
+      const subtitleExtensions = [".srt", ".vtt", ".ass"];
 
       for await (const entry of (watchedFolder as any).values()) {
         if (entry.kind === "file") {
           const nameLower = entry.name.toLowerCase();
-          // Skip known temp/incomplete file patterns
           if (TEMP_EXTENSIONS.some(t => nameLower.endsWith(t))) continue;
-          // Skip Handbrake-style temp files (e.g. "video.mp4.tmp", "~video.mp4")
           if (nameLower.startsWith("~") || nameLower.startsWith(".")) continue;
           const ext = "." + nameLower.split(".").pop();
           if (videoExtensions.includes(ext)) {
@@ -517,11 +567,17 @@ export default function Dashboard() {
             } catch {
               // File might be locked/in-use — skip
             }
+          } else if (subtitleExtensions.includes(ext)) {
+            try {
+              const file = await entry.getFile();
+              const base = entry.name.slice(0, entry.name.lastIndexOf(".")).toLowerCase();
+              subtitleFiles.set(base, file);
+            } catch {}
           }
         }
       }
 
-      const newFilesToUpload: File[] = [];
+      const newFilesToUpload: { file: File; subtitle?: File }[] = [];
       const updatedKnown = new Map(knownFiles);
 
       for (const [name, { size, lastModified }] of Array.from(currentFiles.entries())) {
@@ -529,6 +585,8 @@ export default function Dashboard() {
 
         if (!previous) {
           updatedKnown.set(name, { size, stableCount: 0, lastModified });
+        } else if (previous.queued) {
+          updatedKnown.set(name, { ...previous });
         } else if (previous.size === size && previous.lastModified === lastModified && size > 0) {
           // Both size AND lastModified are unchanged — file is stable
           const newStableCount = previous.stableCount + 1;
@@ -536,26 +594,25 @@ export default function Dashboard() {
 
           const fileAge = Date.now() - lastModified;
           if (newStableCount >= MIN_STABLE_CHECKS && fileAge >= MIN_AGE_MS) {
-            // Check registry (persists across reloads) AND live upload queue
             const alreadyQueued = uploadQueue.some(
               item => item.fileName === name && (item.status === "uploading" || item.status === "complete" || item.status === "pending")
             );
-            const alreadyExists = isVideoDuplicate(name, selectedCollection);
-            if (!alreadyQueued && !alreadyExists) {
+            const alreadyInRegistry = isInUploadedRegistry(name, selectedCollection);
+            if (!alreadyQueued && !alreadyInRegistry) {
               try {
                 for await (const entry of (watchedFolder as any).values()) {
                   if (entry.kind === "file" && entry.name === name) {
                     const file = await entry.getFile();
-                    // Final check: verify the file has a valid duration.
-                    // Handbrake writes the moov atom (duration metadata) only when
-                    // encoding finishes. No duration = file is still being encoded.
                     const hasValidDuration = await checkFileHasDuration(file);
                     if (!hasValidDuration) {
-                      // Reset stable count so we re-check this file next scan
                       updatedKnown.set(name, { size, stableCount: 0, lastModified });
                       break;
                     }
-                    newFilesToUpload.push(file);
+                    const videoBase = name.slice(0, name.lastIndexOf(".")).toLowerCase();
+                    const subtitle = subtitleFiles.get(videoBase);
+                    addToUploadedRegistry(name, selectedCollection);
+                    updatedKnown.set(name, { size, stableCount: newStableCount, lastModified, queued: true });
+                    newFilesToUpload.push({ file, subtitle });
                     break;
                   }
                 }
@@ -572,8 +629,8 @@ export default function Dashboard() {
 
       setKnownFiles(updatedKnown);
 
-      for (const file of newFilesToUpload) {
-        uploadFile(file, selectedCollection);
+      for (const { file, subtitle } of newFilesToUpload) {
+        uploadFile(file, selectedCollection, subtitle);
       }
 
       if (newFilesToUpload.length > 0) {
@@ -584,24 +641,27 @@ export default function Dashboard() {
       toast({ title: "Auto-sync scan failed", description: "Folder access may have been revoked", variant: "destructive" });
       setAutoSyncEnabled(false);
     }
-  }, [watchedFolder, selectedCollection, knownFiles, uploadQueue, uploadFile, isVideoDuplicate, toast]);
+  }, [watchedFolder, selectedCollection, knownFiles, uploadQueue, uploadFile, isInUploadedRegistry, addToUploadedRegistry, toast]);
+
+  useEffect(() => { scanFolderRef.current = scanFolder; });
 
   useEffect(() => {
-    if (autoSyncEnabled && watchedFolder && selectedCollection) {
-      scanFolder();
-      autoSyncIntervalRef.current = setInterval(scanFolder, 60000);
-    } else {
+    if (!autoSyncEnabled || !watchedFolder || !selectedCollection) {
       if (autoSyncIntervalRef.current) {
         clearInterval(autoSyncIntervalRef.current);
         autoSyncIntervalRef.current = null;
       }
+      return;
     }
+    scanFolderRef.current();
+    autoSyncIntervalRef.current = setInterval(() => scanFolderRef.current(), 60000);
     return () => {
       if (autoSyncIntervalRef.current) {
         clearInterval(autoSyncIntervalRef.current);
+        autoSyncIntervalRef.current = null;
       }
     };
-  }, [autoSyncEnabled, watchedFolder, selectedCollection, scanFolder]);
+  }, [autoSyncEnabled, watchedFolder, selectedCollection]);
 
   const videos = videosQuery.data?.items || [];
   const filteredVideos = searchQuery
@@ -853,6 +913,37 @@ export default function Dashboard() {
               Select Watch Folder
             </Button>
           )}
+
+          <div className="flex items-center justify-between mt-3 px-1 py-1.5 rounded-md">
+            <div className="flex items-center gap-1.5">
+              <Captions className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground">Burn Subtitles</span>
+            </div>
+            <button
+              role="switch"
+              aria-checked={burnSubtitles}
+              onClick={() => setBurnSubtitles(!burnSubtitles)}
+              data-testid="switch-burn-subtitles"
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${burnSubtitles ? "bg-primary" : "bg-input"}`}
+            >
+              <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transition-transform ${burnSubtitles ? "translate-x-4" : "translate-x-0"}`} />
+            </button>
+          </div>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start text-xs text-muted-foreground mt-1 h-7"
+            data-testid="button-clear-upload-history"
+            onClick={() => {
+              uploadedRegistry.current = new Set();
+              try { localStorage.removeItem("bunny_uploaded_files"); } catch {}
+              toast({ title: "Upload history cleared" });
+            }}
+          >
+            <X className="w-3 h-3 mr-1.5" />
+            Clear Upload History
+          </Button>
         </div>
       </aside>
 
