@@ -26,6 +26,53 @@ import {
 } from "lucide-react";
 import { Link } from "wouter";
 
+// ── IndexedDB helpers for persisting the folder handle across page reloads ──
+const IDB_NAME = "bunny-sync-db";
+const IDB_STORE = "handles";
+const IDB_KEY = "watchFolder";
+
+function openSyncIDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveFolderHandle(handle: FileSystemDirectoryHandle) {
+  try {
+    const db = await openSyncIDB();
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(handle, IDB_KEY);
+    await new Promise<void>((r, e) => { tx.oncomplete = () => r(); tx.onerror = () => e(tx.error); });
+    db.close();
+  } catch { /* ignore – persistence is best-effort */ }
+}
+
+async function loadFolderHandle(): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    const db = await openSyncIDB();
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const result = await new Promise<any>((r, e) => {
+      const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      req.onsuccess = () => r(req.result ?? null);
+      req.onerror = () => e(req.error);
+    });
+    db.close();
+    return result;
+  } catch { return null; }
+}
+
+async function clearFolderHandle() {
+  try {
+    const db = await openSyncIDB();
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(IDB_KEY);
+    db.close();
+  } catch { /* ignore */ }
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -80,6 +127,7 @@ export default function Dashboard() {
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const [watchedFolder, setWatchedFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [watchedFolderName, setWatchedFolderName] = useState<string>("");
+  const [pendingResumeHandle, setPendingResumeHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [knownFiles, setKnownFiles] = useState<Map<string, { size: number; stableCount: number; lastModified: number; queued?: boolean }>>(new Map());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -555,8 +603,10 @@ export default function Dashboard() {
       const dirHandle = await (window as any).showDirectoryPicker({ mode: "read" });
       setWatchedFolder(dirHandle);
       setWatchedFolderName(dirHandle.name);
+      setPendingResumeHandle(null);
       setKnownFiles(new Map<string, { size: number; stableCount: number; lastModified: number }>());
       setAutoSyncEnabled(false);
+      saveFolderHandle(dirHandle);
       toast({ title: "Folder selected", description: `Watching: ${dirHandle.name}` });
     } catch (err: any) {
       if (err.name !== "AbortError") {
@@ -724,6 +774,45 @@ export default function Dashboard() {
       }
     };
   }, [autoSyncEnabled, watchedFolder, selectedCollection]);
+
+  // ── Persist autoSyncEnabled to localStorage whenever it changes ──
+  useEffect(() => {
+    localStorage.setItem("bunny_autosync_enabled", String(autoSyncEnabled));
+  }, [autoSyncEnabled]);
+
+  // ── On mount: restore folder handle + auto-resume sync from previous session ──
+  useEffect(() => {
+    loadFolderHandle().then(async (handle) => {
+      if (!handle) return;
+      try {
+        const perm = await (handle as any).queryPermission({ mode: "read" });
+        if (perm === "granted") {
+          setWatchedFolder(handle);
+          setWatchedFolderName(handle.name);
+          if (localStorage.getItem("bunny_autosync_enabled") === "true") {
+            setAutoSyncEnabled(true);
+          }
+        } else {
+          setWatchedFolderName(handle.name);
+          setPendingResumeHandle(handle);
+        }
+      } catch {
+        setWatchedFolderName(handle.name);
+        setPendingResumeHandle(handle);
+      }
+    });
+  }, []);
+
+  // ── visibilitychange: immediately re-scan when the tab/RDP window becomes active ──
+  useEffect(() => {
+    const handleVisible = () => {
+      if (document.visibilityState === "visible" && autoSyncEnabled && watchedFolder) {
+        scanFolderRef.current();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisible);
+    return () => document.removeEventListener("visibilitychange", handleVisible);
+  }, [autoSyncEnabled, watchedFolder]);
 
   const videos = videosQuery.data?.items || [];
   const filteredVideos = searchQuery
@@ -963,6 +1052,45 @@ export default function Dashboard() {
                   Checking every 60 seconds...
                 </p>
               )}
+            </div>
+          ) : pendingResumeHandle ? (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-sm">
+                <FolderInput className="w-4 h-4 text-amber-500 shrink-0" />
+                <span className="truncate text-xs text-amber-600 dark:text-amber-400">{watchedFolderName}</span>
+              </div>
+              <Button
+                size="sm"
+                variant="default"
+                className="w-full"
+                data-testid="button-resume-sync"
+                onClick={async () => {
+                  try {
+                    const perm = await (pendingResumeHandle as any).requestPermission({ mode: "read" });
+                    if (perm === "granted") {
+                      setWatchedFolder(pendingResumeHandle);
+                      setPendingResumeHandle(null);
+                      saveFolderHandle(pendingResumeHandle);
+                      if (selectedCollection) {
+                        setAutoSyncEnabled(true);
+                        toast({ title: "Sync resumed", description: `Watching: ${pendingResumeHandle.name}` });
+                      } else {
+                        toast({ title: "Folder access restored", description: "Select a collection then start sync" });
+                      }
+                    } else {
+                      toast({ title: "Permission denied", description: "Cannot access the folder", variant: "destructive" });
+                    }
+                  } catch (err: any) {
+                    toast({ title: "Resume failed", description: err.message, variant: "destructive" });
+                  }
+                }}
+              >
+                <Play className="w-3.5 h-3.5 mr-1.5" />
+                Resume Sync
+              </Button>
+              <Button size="sm" variant="ghost" className="w-full text-xs text-muted-foreground" onClick={async () => { setPendingResumeHandle(null); setWatchedFolderName(""); await clearFolderHandle(); }}>
+                Change Folder
+              </Button>
             </div>
           ) : (
             <Button
