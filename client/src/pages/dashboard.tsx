@@ -132,6 +132,7 @@ export default function Dashboard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const scanFolderRef = useRef<() => void>(() => {});
+  const syncPersistInitRef = useRef(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedVideos, setSelectedVideos] = useState<Set<string>>(new Set());
   const uploadedRegistry = useRef<Set<string>>(new Set());
@@ -775,8 +776,12 @@ export default function Dashboard() {
     };
   }, [autoSyncEnabled, watchedFolder, selectedCollection]);
 
-  // ── Persist autoSyncEnabled to localStorage whenever it changes ──
+  // ── Persist autoSyncEnabled to localStorage (skip first render to avoid overwriting saved state) ──
   useEffect(() => {
+    if (!syncPersistInitRef.current) {
+      syncPersistInitRef.current = true;
+      return;
+    }
     localStorage.setItem("bunny_autosync_enabled", String(autoSyncEnabled));
   }, [autoSyncEnabled]);
 
